@@ -2,14 +2,14 @@
 AdjustCo is a command line tool which makes http requests and prints the address of the request
 along with the MD5 hash of the response.
 
-##Installation
+## Installation
 Use the go build command to build the package
 
 ```bash
 go build main.go
 ```
 
-##Usage
+## Usage
 ./main adjust.com # returns http://adjust.com b9e73272f11c3a60e0974e34815e06de
 
 ./main https://www.google.com https://www.twitter.com https://www.twilio.com https://www.facebook.com https://www.goal.com #return 
