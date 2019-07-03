@@ -1,67 +1,89 @@
 package main
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
-func main() {
-	var limit int
-	flag.IntVar(&limit, "parallel", 10, "an integer specifying how many concurrent requests are allowed")
-	flag.Parse()
+var limit = flag.Int("parallel", 10, "an integer specifying how many concurrent requests are allowed")
 
-	targets := flag.Args()
+func main() {
+
+	flag.Parse()
+	ctx := context.Background()
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
 
-	ch := make(chan string)
+	targets := make(chan string)
 
-	if len(targets) > limit {
-		maxBatches := len(targets) / limit
-		targetsPerBatch := limit
-		for b := 0; b <= maxBatches; b++ {
-			batchTargets := batch(targets, b, targetsPerBatch)
-			runBatch(batchTargets, len(batchTargets), client, ch)
+	if *limit < 1 {
+		log.Fatal("parallel flag must be at least one")
+	}
+
+	go func() {
+
+		defer close(targets)
+
+		for _, target := range flag.Args() {
+			targets <- target
 		}
-	} else {
-		limit = len(targets)
-		runBatch(targets, limit, client, ch)
+	}()
+
+	var wg sync.WaitGroup
+
+	results := make(chan string)
+
+	wg.Add(*limit)
+
+	for i := 0; i < *limit; i++ {
+
+		go func() {
+			defer wg.Done()
+
+			for target := range targets {
+				result, err := makeRequest(ctx, client, target)
+
+				if err != nil {
+					log.Printf("error from %q: %v", target, err)
+					continue
+				}
+
+				results <- fmt.Sprintf("%s\t%s", target, result)
+			}
+		}()
+
 	}
 
-}
+	go func() {
+		wg.Wait()
 
-//runBatch calls the goroutine to make requests and prints out info on the channel
-func runBatch(targets []string, limit int, cl *http.Client, ch chan string) {
-	for i := 0; i < limit; i++ {
-		go makeRequest(cl, targets[i], ch)
+		close(results)
+	}()
+
+	for result := range results {
+		fmt.Println(result)
 	}
 
-	for range targets {
-		fmt.Println(<-ch)
-	}
-}
-
-//batch defines the start and end of a batch to run
-func batch(targets []string, page, pageSize int) []string {
-	start := pageSize * page
-	end := pageSize * (page + 1)
-	if page == len(targets)/pageSize {
-		return targets[start:]
-	}
-	return targets[start:end]
 }
 
 //MakeRequest sends a get request to url
-func makeRequest(cl *http.Client, inurl string, ch chan<- string) {
+func makeRequest(ctx context.Context, cl *http.Client, inurl string) (string, error) {
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 
 	u, err := url.Parse(inurl)
 
@@ -75,28 +97,26 @@ func makeRequest(cl *http.Client, inurl string, ch chan<- string) {
 
 	req, err := http.NewRequest(http.MethodGet, inurl, nil)
 	if err != nil {
-		log.Printf("failed creating request to %s with error %v", inurl, err)
-		return
+		return "", err
 	}
 
-	res, err := cl.Do(req)
+	res, err := cl.Do(req.WithContext(ctx))
 	if err != nil {
-		log.Printf("failed making request to %s with error %v", inurl, err)
-		return
+		return "", err
 	}
 
 	if res.StatusCode != http.StatusOK {
-		log.Printf("")
-		return
+		_, _ = io.Copy(ioutil.Discard, res.Body)
+		return "", errors.New(res.Status)
 	}
 
 	defer res.Body.Close()
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		return
+		return "", err
 	}
 
-	ch <- fmt.Sprintf("%s %s", inurl, HashResponse(body))
+	return HashResponse(body), nil
 }
 
 //HashResponse returns MD5 encoded string
